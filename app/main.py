@@ -1,10 +1,10 @@
 import sys
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from datetime import datetime
-from app.config import YOUTUBE_CHANNEL_URLS
+from app.config import YOUTUBE_CHANNEL_URLS, YOUTUBE_API_KEY
 from app.youtube_client import get_latest_videos
 from app.transcript_client import get_video_transcript
 from app.summarizer import summarize_transcript
@@ -57,6 +57,29 @@ async def get_summaries():
 @app.post("/refresh")
 async def refresh_summaries():
     """Refresh summaries by fetching latest videos and generating summaries."""
+    # Validación temprana: verificar que YOUTUBE_API_KEY esté configurada
+    if not YOUTUBE_API_KEY:
+        error_msg = (
+            "❌ ERROR: YOUTUBE_API_KEY no está configurada.\n\n"
+            "Para usar esta aplicación, necesitas configurar tu API key de YouTube:\n"
+            "1. Crea un archivo .env en la raíz del proyecto\n"
+            "2. Agrega la línea: YOUTUBE_API_KEY=tu_api_key_aqui\n"
+            "3. Obtén tu API key en: https://console.cloud.google.com/apis/credentials\n\n"
+            "Sin la API key, no es posible obtener videos de YouTube."
+        )
+        log_print("\n" + "="*80)
+        log_print(error_msg)
+        log_print("="*80 + "\n")
+        logger.error(error_msg)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "YOUTUBE_API_KEY no configurada",
+                "message": "La API key de YouTube no está configurada. Por favor, configura YOUTUBE_API_KEY en tu archivo .env",
+                "instructions": "1. Crea un archivo .env en la raíz del proyecto\n2. Agrega: YOUTUBE_API_KEY=tu_api_key_aqui\n3. Obtén tu API key en: https://console.cloud.google.com/apis/credentials"
+            }
+        )
+    
     logger.info("="*80)
     logger.info("🔄 INICIANDO REFRESH - Buscando videos largos (EXCLUYENDO Shorts)")
     logger.info("="*80)

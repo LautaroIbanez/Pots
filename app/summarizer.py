@@ -42,3 +42,4 @@ Resumen:"""
     except Exception as e:
         return f"Error al generar resumen: {str(e)}"
 
+

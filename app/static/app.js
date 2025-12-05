@@ -15,15 +15,28 @@ async function loadSummaries() {
 async function refreshSummaries() {
     const refreshBtn = document.getElementById('refreshBtn');
     const loading = document.getElementById('loading');
+    const content = document.getElementById('content');
     refreshBtn.disabled = true;
     loading.classList.remove('hidden');
     try {
         const response = await fetch('/refresh', { method: 'POST' });
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: { message: 'Error desconocido' } }));
+            const errorDetail = errorData.detail || errorData;
+            let errorMessage = errorDetail.message || 'Error al actualizar los resúmenes';
+            if (errorDetail.instructions) {
+                errorMessage += '\n\n' + errorDetail.instructions;
+            }
+            content.innerHTML = `<div class="empty-state error-state"><h2>❌ Error de Configuración</h2><p>${errorMessage.replace(/\n/g, '<br>')}</p></div>`;
+            alert(errorMessage);
+            return;
+        }
         const data = await response.json();
         summariesData = data;
         renderSummaries();
     } catch (error) {
         console.error('Error refreshing summaries:', error);
+        content.innerHTML = '<div class="empty-state error-state"><h2>❌ Error</h2><p>Error al actualizar los resúmenes. Verifica la consola para más detalles.</p></div>';
         alert('Error al actualizar los resúmenes');
     } finally {
         refreshBtn.disabled = false;

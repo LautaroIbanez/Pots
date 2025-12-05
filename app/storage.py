@@ -60,3 +60,4 @@ def get_all_summaries() -> list[VideoSummary]:
     summaries = load_summaries()
     return [VideoSummary(**data) for data in summaries.values()]
 
+

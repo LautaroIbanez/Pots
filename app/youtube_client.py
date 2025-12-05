@@ -5,7 +5,7 @@ import re
 from typing import List, Optional
 from urllib.parse import unquote
 import isodate
-from app.config import YOUTUBE_API_KEY, MAX_VIDEOS_PER_CHANNEL, MIN_VIDEO_DURATION_SECONDS
+from app.config import YOUTUBE_API_KEY, MAX_VIDEOS_PER_CHANNEL, MIN_VIDEO_DURATION_SECONDS, get_min_duration_for_channel
 from app.models import VideoSummary
 
 logger = logging.getLogger(__name__)
@@ -109,14 +109,14 @@ def get_channel_name(channel_id: str) -> str:
 def get_latest_videos(channel_url: str, min_duration_seconds: int = None) -> List[VideoSummary]:
     """
     Get latest long videos from a YouTube channel, EXCLUYENDO Shorts y videos cortos.
-    Solo procesa videos de la pestaña "Videos" del canal (no "Shorts").
+    Usa el playlist de uploads del canal para obtener videos de la pestaña "Videos" con paginación.
     
     Args:
         channel_url: URL del canal de YouTube
-        min_duration_seconds: Duración mínima en segundos (default: desde config, 600 = 10 minutos)
+        min_duration_seconds: Duración mínima en segundos (default: desde config por canal o global)
     """
     if min_duration_seconds is None:
-        min_duration_seconds = MIN_VIDEO_DURATION_SECONDS
+        min_duration_seconds = get_min_duration_for_channel(channel_url)
     if not YOUTUBE_API_KEY:
         log_print(f"Warning: YOUTUBE_API_KEY not configured. Cannot fetch videos for {channel_url}")
         return []
@@ -125,73 +125,113 @@ def get_latest_videos(channel_url: str, min_duration_seconds: int = None) -> Lis
         log_print(f"Could not get channel ID for {channel_url}")
         return []
     channel_name = get_channel_name(channel_id)
-    log_print(f"  Buscando videos largos (mínimo {min_duration_seconds // 60} minutos) - EXCLUYENDO Shorts...")
+    duration_min = min_duration_seconds // 60
+    duration_sec = min_duration_seconds % 60
+    if duration_min > 0:
+        duration_str = f"{duration_min}m{duration_sec}s" if duration_sec > 0 else f"{duration_min} minutos"
+    else:
+        duration_str = f"{duration_sec} segundos"
+    log_print(f"  Buscando videos (mínimo {duration_str}) - EXCLUYENDO Shorts...")
     try:
-        # 1) Pedir más videos de los necesarios porque vamos a filtrar Shorts
-        # Pedimos 5x más para asegurar que tengamos suficientes videos largos
-        # IMPORTANTE: La API de YouTube no diferencia "Videos" de "Shorts", 
-        # así que filtramos por duración para excluir Shorts (< 10 min)
-        search_url = f"https://www.googleapis.com/youtube/v3/search?part=id&channelId={channel_id}&type=video&order=date&maxResults={MAX_VIDEOS_PER_CHANNEL * 5}&key={YOUTUBE_API_KEY}"
-        response = requests.get(search_url)
-        if response.status_code != 200:
-            error_data = response.json() if response.content else {}
+        # 1) Obtener el playlist de uploads del canal
+        channels_url = f"https://www.googleapis.com/youtube/v3/channels?part=contentDetails&id={channel_id}&key={YOUTUBE_API_KEY}"
+        channels_response = requests.get(channels_url)
+        if channels_response.status_code != 200:
+            error_data = channels_response.json() if channels_response.content else {}
             error_msg = error_data.get("error", {}).get("message", "Unknown error")
-            log_print(f"Error fetching videos for {channel_url} (status {response.status_code}): {error_msg}")
+            log_print(f"Error fetching channel details for {channel_url} (status {channels_response.status_code}): {error_msg}")
             return []
-        search_data = response.json()
-        video_ids = [item["id"]["videoId"] for item in search_data.get("items", [])]
+        channels_data = channels_response.json()
+        if not channels_data.get("items"):
+            log_print(f"No channel data found for {channel_url}")
+            return []
+        uploads_playlist_id = channels_data["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
+        log_print(f"  Playlist de uploads encontrado: {uploads_playlist_id}")
+        
+        # 2) Recorrer el playlist de uploads con paginación
+        video_ids = []
+        next_page_token = None
+        max_pages = 10  # Límite de seguridad para evitar loops infinitos
+        page_count = 0
+        
+        while len(video_ids) < MAX_VIDEOS_PER_CHANNEL * 10 and page_count < max_pages:
+            page_count += 1
+            playlist_url = f"https://www.googleapis.com/youtube/v3/playlistItems?part=contentDetails&playlistId={uploads_playlist_id}&maxResults=50&key={YOUTUBE_API_KEY}"
+            if next_page_token:
+                playlist_url += f"&pageToken={next_page_token}"
+            playlist_response = requests.get(playlist_url)
+            if playlist_response.status_code != 200:
+                error_data = playlist_response.json() if playlist_response.content else {}
+                error_msg = error_data.get("error", {}).get("message", "Unknown error")
+                log_print(f"Error fetching playlist items (status {playlist_response.status_code}): {error_msg}")
+                break
+            playlist_data = playlist_response.json()
+            page_video_ids = [item["contentDetails"]["videoId"] for item in playlist_data.get("items", [])]
+            video_ids.extend(page_video_ids)
+            log_print(f"  Página {page_count}: {len(page_video_ids)} videos encontrados (total acumulado: {len(video_ids)})")
+            next_page_token = playlist_data.get("nextPageToken")
+            if not next_page_token:
+                break
+        
         if not video_ids:
+            log_print(f"  No se encontraron videos en el playlist de uploads")
             return []
         
-        # 2) Obtener detalles de los videos (incluyendo duración) para filtrar Shorts
-        video_ids_str = ",".join(video_ids)
-        details_url = f"https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails&id={video_ids_str}&key={YOUTUBE_API_KEY}"
-        details_response = requests.get(details_url)
-        if details_response.status_code != 200:
-            log_print(f"Error fetching video details for {channel_url}")
-            return []
-        details_data = details_response.json()
-        
+        # 3) Obtener detalles de los videos (incluyendo duración) para filtrar Shorts
+        # Procesar en lotes de 50 (límite de la API)
         long_videos = []
-        for item in details_data.get("items", []):
-            video_id = item["id"]
-            snippet = item["snippet"]
-            content_details = item.get("contentDetails", {})
-            duration_iso = content_details.get("duration", "PT0S")
-            
-            # Parsear duración ISO 8601 usando isodate
-            try:
-                duration = isodate.parse_duration(duration_iso).total_seconds()
-            except Exception:
-                duration = 0
-            
-            duration_min = int(duration // 60)
-            duration_sec = int(duration % 60)
-            
-            # FILTRAR SHORTS: solo videos más largos que min_duration_seconds (10 minutos)
-            # Los Shorts típicamente duran menos de 60 segundos, pero usamos 10 min para estar seguros
-            if duration < min_duration_seconds:
-                log_print(f"  [FILTRADO - SHORT] {snippet['title'][:50]}... - Duración: {duration_min}m{duration_sec}s (muy corto, se excluye)")
+        batch_size = 50
+        for i in range(0, len(video_ids), batch_size):
+            batch_ids = video_ids[i:i + batch_size]
+            video_ids_str = ",".join(batch_ids)
+            details_url = f"https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails&id={video_ids_str}&key={YOUTUBE_API_KEY}"
+            details_response = requests.get(details_url)
+            if details_response.status_code != 200:
+                log_print(f"Error fetching video details for batch {i // batch_size + 1}")
                 continue
+            details_data = details_response.json()
             
-            log_print(f"  [✓ VIDEO LARGO] {snippet['title'][:60]}... - Duración: {duration_min}m{duration_sec}s - ID: {video_id}")
+            for item in details_data.get("items", []):
+                video_id = item["id"]
+                snippet = item["snippet"]
+                content_details = item.get("contentDetails", {})
+                duration_iso = content_details.get("duration", "PT0S")
+                
+                # Parsear duración ISO 8601 usando isodate
+                try:
+                    duration = isodate.parse_duration(duration_iso).total_seconds()
+                except Exception:
+                    duration = 0
+                
+                duration_min = int(duration // 60)
+                duration_sec = int(duration % 60)
+                
+                # FILTRAR SHORTS: solo videos más largos que min_duration_seconds
+                if duration < min_duration_seconds:
+                    log_print(f"  [FILTRADO] {snippet['title'][:50]}... - Duración: {duration_min}m{duration_sec}s (menor a {min_duration_seconds // 60}m{min_duration_seconds % 60}s, se excluye)")
+                    continue
+                
+                log_print(f"  [✓ ACEPTADO] {snippet['title'][:60]}... - Duración: {duration_min}m{duration_sec}s - ID: {video_id}")
+                
+                video_summary = VideoSummary(
+                    video_id=video_id,
+                    title=snippet["title"],
+                    channel_name=channel_name,
+                    channel_url=channel_url,
+                    published_at=snippet["publishedAt"],
+                    video_url=f"https://www.youtube.com/watch?v={video_id}",
+                    has_transcript=False
+                )
+                long_videos.append(video_summary)
+                
+                # Limitar a MAX_VIDEOS_PER_CHANNEL videos largos
+                if len(long_videos) >= MAX_VIDEOS_PER_CHANNEL:
+                    break
             
-            video_summary = VideoSummary(
-                video_id=video_id,
-                title=snippet["title"],
-                channel_name=channel_name,
-                channel_url=channel_url,
-                published_at=snippet["publishedAt"],
-                video_url=f"https://www.youtube.com/watch?v={video_id}",
-                has_transcript=False
-            )
-            long_videos.append(video_summary)
-            
-            # Limitar a MAX_VIDEOS_PER_CHANNEL videos largos
             if len(long_videos) >= MAX_VIDEOS_PER_CHANNEL:
                 break
         
-        log_print(f"  Total videos largos encontrados: {len(long_videos)} (Shorts excluidos)")
+        log_print(f"  Total videos aceptados: {len(long_videos)} (videos < {min_duration_seconds // 60}m{min_duration_seconds % 60}s excluidos)")
         return long_videos
     except Exception as e:
         log_print(f"  ✗ Error getting videos for channel {channel_url}: {e}")

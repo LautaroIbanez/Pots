@@ -18,3 +18,4 @@ class ChannelVideos(BaseModel):
     channel_url: str
     videos: list[VideoSummary]
 
+
