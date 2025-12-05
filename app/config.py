@@ -27,6 +27,11 @@ DATA_DIR = "data"
 SUMMARIES_FILE = os.path.join(DATA_DIR, "summaries.json")
 CHANNEL_CONFIG_FILE = os.path.join(DATA_DIR, "channel_config.json")
 
+# Control de peticiones de transcript
+TRANSCRIPT_MAX_RETRIES = int(os.getenv("TRANSCRIPT_MAX_RETRIES", "3"))
+TRANSCRIPT_RETRY_BACKOFF_SECONDS = float(os.getenv("TRANSCRIPT_RETRY_BACKOFF_SECONDS", "2.5"))
+TRANSCRIPT_REQUEST_DELAY_SECONDS = float(os.getenv("TRANSCRIPT_REQUEST_DELAY_SECONDS", "0.5"))
+
 # Configuración por canal: mapea URL del canal a duración mínima en segundos
 # Si no se especifica, se usa MIN_VIDEO_DURATION_SECONDS global
 CHANNEL_MIN_DURATION: Dict[str, int] = {}
